@@ -20,7 +20,9 @@ frases **antes de começar** e ofereça o que dá para fazer bem:
 
 - cena renderizada de **objetos e ambientes simples** (produto, natureza-morta, sala vazia), por path tracing;
 - **realismo estilizado** ou **ilustração** do mesmo assunto (pessoa em vetor, retrato em recorte de papel);
-- se a pessoa precisa mesmo de foto de gente, indicar que isso pede um gerador de imagem por difusão.
+- **animal peludo realista** (cachorro, gato, urso): modelo 3D com pelo de verdade no Blender, se ele estiver
+  instalado (técnica `blender-pelo`). Sai um render de estúdio que lê como pelúcia ou personagem de animação;
+- se a pessoa precisa mesmo de foto de gente ou de animal real, indicar que isso pede um gerador por difusão.
 
 Nunca prometa o que não entrega. Nunca chame de "foto" o que é um render.
 
@@ -34,6 +36,8 @@ código diferente de 0 em erro. Precisam de Node 18+ e de Edge, Chrome ou Chromi
 node "${CLAUDE_PLUGIN_ROOT}/scripts/renderizar.mjs" entrada.html saida.png --largura 1280 --altura 960
 # várias imagens numa folha rotulada (A, B, C...)
 node "${CLAUDE_PLUGIN_ROOT}/scripts/folha-de-contato.mjs" folha.png a.png b.png c.png --rotulos "A: ...,B: ...,C: ..."
+# script do Blender para PNG (só na técnica blender-pelo)
+node "${CLAUDE_PLUGIN_ROOT}/scripts/blender.mjs" animal.py saida.png --lado 600 --amostras 40 --filhos 20
 # duas imagens lado a lado
 node "${CLAUDE_PLUGIN_ROOT}/scripts/antes-depois.mjs" antes.png depois.png antes-depois.png
 # confere largura e altura sem abrir a imagem
@@ -81,10 +85,12 @@ já tem ficha, use a ficha. Detalhes em `referencias/consistencia.md` e `referen
 | Ilustração, paisagem, arte com textura, padrão, pintura digital | `canvas2d` | `referencias/canvas2d.md` | `modelos/canvas-ilustracao.html` |
 | "Foto" de objetos, produto, natureza-morta, ambiente simples | `webgl-shader` | `referencias/webgl-shader.md` | `modelos/webgl-raymarch.html` |
 | Mexer numa imagem que já existe (corrigir, restaurar, recortar, compor) | `edicao` | `referencias/edicao.md` | `modelos/edicao.html` |
+| Animal peludo **realista** (cachorro, gato, urso), com Blender instalado | `blender-pelo` | `referencias/blender-pelo.md` | `modelos/blender-animal-pelo.py` |
 
 Desempates: texto é protagonista, vá de `html-css`. Precisa escalar sem perder (marca), vá de `svg`.
 Precisa de textura e irregularidade, vá de `canvas2d`. Precisa de luz e sombra de verdade, vá de
-`webgl-shader`. Pode combinar: fundo em canvas com título em HTML por cima, na mesma página.
+`webgl-shader`. Pediram animal "realista" e `scripts/blender.mjs --diagnostico` acha o Blender, vá de
+`blender-pelo` direto: pintar pelo em `canvas2d` gasta três rodadas e fica com cara de pintura. Pode combinar: fundo em canvas com título em HTML por cima, na mesma página.
 
 **Leia o guia da técnica escolhida antes de escrever código**, e `referencias/composicao-cor-luz.md` se
 ainda não leu nesta conversa. Comece copiando o modelo, não do zero.
@@ -157,7 +163,8 @@ usuário gostou), ofereça salvar como ficha ou estilo.
 3. **Texto na imagem é conferido letra por letra**. Erro de grafia derruba a nota de fidelidade para 4.
 4. **Saída em `imagens/<nome-curto>/`** no projeto do usuário. Nada fora dali, nada dentro do plugin.
 5. **Sem internet**: nenhuma fonte, imagem ou biblioteca remota. Tudo embutido na página.
-6. **Nenhum gerador externo** (API de imagem, Canva, Blender), a menos que o usuário peça isso com todas as letras.
+6. **Nenhum gerador externo** (API de imagem, Canva), a menos que o usuário peça isso com todas as letras. O
+   Blender instalado na máquina pode ser usado só pela técnica `blender-pelo`, com script e sem baixar nada.
 7. **O original é intocável** em edição: trabalhe em cópia e entregue antes e depois.
 8. **Semente fixa** em tudo que usa acaso, para a imagem poder ser refeita igual.
 
@@ -172,6 +179,7 @@ usuário gostou), ofereça salvar como ficha ou estilo.
 | `referencias/canvas2d.md` | Ilustração e arte procedural |
 | `referencias/webgl-shader.md` | Cena realista por path tracing |
 | `referencias/edicao.md` | Editar e restaurar imagem existente |
+| `referencias/blender-pelo.md` | Animal realista em 3D com pelo, pelo Blender |
 | `referencias/estilos.md` | Escolher, aplicar e salvar estilos |
 | `referencias/consistencia.md` | Fichas de personagem e de marca |
 

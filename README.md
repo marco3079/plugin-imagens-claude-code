@@ -1,8 +1,9 @@
 # plugin-imagens-claude-code
 
 Plugin do Claude Code que faz o Claude ficar bom em gerar imagens **sem gerador externo**. Nada de API de
-imagem, Canva ou Blender: o Claude escreve código que desenha, renderiza no navegador que já está na sua
-máquina, **abre o resultado, dá nota e refaz** até ficar bom.
+imagem nem Canva: o Claude escreve código que desenha, renderiza no navegador que já está na sua
+máquina, **abre o resultado, dá nota e refaz** até ficar bom. Para animal peludo realista ele usa o Blender,
+se estiver instalado, também só por script.
 
 ![Do pedido à imagem em oito passos](exemplos/infografico/infografico.png)
 
@@ -78,6 +79,7 @@ variações e o código-fonte, para você pedir ajustes ("deixa o céu mais roxo
 | `canvas2d` | Ilustração e arte procedural, com ruído, textura e semente fixa |
 | `webgl-shader` | Cena realista de objetos por path tracing num fragment shader |
 | `edicao` | Editar e restaurar uma imagem existente por operações em pixels |
+| `blender-pelo` | Animal peludo realista: modelo 3D com fios de pelo e luz do Cycles (precisa do Blender) |
 
 ## Exemplos
 
@@ -93,6 +95,15 @@ correções que ele apontou foram aplicadas e as imagens abaixo já são as corr
 | Lago ao entardecer | `canvas2d` | 3 | 7 | [`exemplos/ilustracao/`](exemplos/ilustracao/) |
 | Natureza-morta | `webgl-shader` | 5 | 6 | [`exemplos/natureza-morta/`](exemplos/natureza-morta/) |
 | Foto restaurada | `edicao` | 5 | 5 | [`exemplos/restauracao/`](exemplos/restauracao/) |
+| Cachorro em 3D | `blender-pelo` | 4 | não avaliado | [`exemplos/cachorro-3d/`](exemplos/cachorro-3d/) |
+
+### Animal realista em 3D
+
+![Cachorro em 3D com pelo](exemplos/cachorro-3d/cachorro-3d.png)
+
+O mesmo pedido ("um cachorro realista") pintado em `canvas2d` deu [esta pintura](exemplos/cachorro-3d/antes-pintura-2d.png).
+Em 3D o pelo, o brilho dos olhos e o desfoque são reais, mas o corpo é feito de formas simples e o resultado
+lê como pelúcia bem fotografada, não como foto de um cachorro de verdade.
 
 ### Logo e ícone
 

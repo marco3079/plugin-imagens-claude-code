@@ -1,7 +1,7 @@
 {
   "name": "imagens",
   "version": "0.1.0",
-  "description": "Faz o Claude gerar imagens boas sem gerador externo: ele escreve código que desenha (SVG, HTML e CSS, canvas, shader WebGL), renderiza no navegador da máquina, olha o resultado, dá nota e refaz. Inclui edição e restauração de fotos, biblioteca de estilos e fichas de consistência.",
+  "description": "Faz o Claude gerar imagens boas sem gerador externo: ele escreve código que desenha (SVG, HTML e CSS, canvas, shader WebGL e, para animais com pelo, Blender por script), renderiza no navegador da máquina, olha o resultado, dá nota e refaz. Inclui edição e restauração de fotos, biblioteca de estilos e fichas de consistência.",
   "author": { "name": "marco3079" },
   "homepage": "https://github.com/marco3079/plugin-imagens-claude-code",
   "repository": "https://github.com/marco3079/plugin-imagens-claude-code",
