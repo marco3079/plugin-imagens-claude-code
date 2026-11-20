@@ -1,0 +1,7 @@
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+# saídas de trabalho de quem testa o plugin dentro do próprio repositório
+/imagens/
+/.claude/imagens/

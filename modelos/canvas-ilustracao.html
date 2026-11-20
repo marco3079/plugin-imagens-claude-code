@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Modelo: ilustração procedural em canvas 2D</title>
+<style>html, body { margin: 0; background: #111; } canvas { display: block; }</style>
+</head>
+<body>
+<canvas id="tela"></canvas>
+<script>
+// =====================================================================================
+// MODELO canvas-ilustracao: paisagem em camadas, com semente fixa, ruído e textura de papel.
+//
+// Renderize com:
+//   node scripts/renderizar.mjs ilustracao.html saida.png --largura 1536 --altura 1024 --canvas "#tela"
+//
+// O que reaproveitar: acaso(semente), ruido2/fbm, a ordem das camadas (céu, astros, nuvens,
+// planos do fundo para a frente, água, primeiro plano, textura, vinheta) e o acabamento final.
+// Mude CFG e PALETAS para variar. A mesma semente dá sempre a mesma imagem.
+// =====================================================================================
+window.IMAGEM_PRONTA = false;
+
+const CFG = {
+  semente: 2026,
+  paleta: 'entardecer',     // entardecer | noite | manha
+  solX: 0.66, solY: 0.445,   // posição do astro (fração da tela). Fora do centro, perto de um terço
+  horizonte: 0.70,          // onde começa a água (fração da altura)
+  serras: 5,                // quantos planos de montanha
+  pinheiros: true,
+  graoPapel: 0.055,         // força da textura de papel (0 desliga)
+};
+
+const PALETAS = {
+  // ceu: do alto para o horizonte. serras: da mais distante para a mais próxima.
+  entardecer: { ceu: ['#1d2b53', '#4a4a7a', '#c96f6b', '#f4a261', '#ffd9a0'], sol: '#fff1c9', brilho: '#ffb869',
+                serras: ['#c98a8f', '#9c6a86', '#6b4a78', '#3f335f', '#221f3d'], frente: '#12122a', nevoa: '#ffcf9e', luzJanela: '#ffd27a' },
+  noite:      { ceu: ['#050b1f', '#0c1a3a', '#17335c', '#2b5c7e', '#6fa3a8'], sol: '#f4f7ff', brilho: '#9fd0e6',
+                serras: ['#4f7f96', '#38627f', '#264a69', '#183352', '#0d1f38'], frente: '#060f20', nevoa: '#9fd0e6', luzJanela: '#ffc864' },
+  manha:      { ceu: ['#7fb0c9', '#a9cfd8', '#dfe8d8', '#f8e6c4', '#fff3dc'], sol: '#ffffff', brilho: '#ffe9b0',
+                serras: ['#b9cfd2', '#93b4b8', '#6c9596', '#467273', '#27504f'], frente: '#173836', nevoa: '#fff6e2', luzJanela: '#ffd27a' },
+};
+
+// ---------------------------------------------------------------- acaso com semente
+function acaso(semente){ let a = semente >>> 0; return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const R = acaso(CFG.semente);
+const entre = (a, b) => a + (b - a) * R();
+
+// ---------------------------------------------------------------- ruído de valor 2D
+function h2(x, y){ let n = Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(CFG.semente, 2246822519); n = Math.imul(n ^ n >>> 13, 1274126177); return ((n ^ n >>> 16) >>> 0) / 4294967296; }
+function ruido2(x, y){ const xi = Math.floor(x), yi = Math.floor(y); let fx = x - xi, fy = y - yi; fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
+  const a = h2(xi, yi), b = h2(xi + 1, yi), c = h2(xi, yi + 1), d = h2(xi + 1, yi + 1); return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy; }
+function fbm(x, y, oitavas = 5){ let s = 0, a = 0.5, f = 1; for (let i = 0; i < oitavas; i++){ s += a * ruido2(x * f, y * f); f *= 2.02; a *= 0.5; } return s; }
+
+// ---------------------------------------------------------------- cor
+const hex = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+const rgba = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const mistura = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
+const tela = document.getElementById('tela');
+const W = tela.width = Math.round(innerWidth), H = tela.height = Math.round(innerHeight);
+const g = tela.getContext('2d');
+const P = PALETAS[CFG.paleta];
+const U = Math.min(W, H) / 1000;   // unidade: tudo proporcional, a imagem escala sem mudar o desenho
+const yHor = H * CFG.horizonte;
+
+// ---------------------------------------------------------------- 1. céu
+function ceu(){
+  const gr = g.createLinearGradient(0, 0, 0, yHor);
+  P.ceu.forEach((c, i) => gr.addColorStop(i / (P.ceu.length - 1), c));
+  g.fillStyle = gr; g.fillRect(0, 0, W, yHor + 2);
+  if (CFG.paleta === 'noite') {                       // estrelas: mais densas no alto, tamanhos variados
+    for (let i = 0; i < 420; i++) {
+      const x = R() * W, y = Math.pow(R(), 1.8) * yHor * 0.85, r = (0.4 + Math.pow(R(), 4) * 1.8) * U;
+      g.fillStyle = rgba([235, 240, 255], 0.25 + 0.75 * R()); g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+    }
+  }
+}
+
+// ---------------------------------------------------------------- 2. sol ou lua com halo
+function astro(){
+  const x = W * CFG.solX, y = H * CFG.solY, r = 46 * U;
+  for (const [raio, alfa] of [[9, 0.10], [5, 0.16], [2.6, 0.28]]) {    // três halos, do largo ao estreito
+    const gr = g.createRadialGradient(x, y, r * 0.6, x, y, r * raio);
+    gr.addColorStop(0, rgba(hex(P.brilho), alfa)); gr.addColorStop(1, rgba(hex(P.brilho), 0));
+    g.fillStyle = gr; g.fillRect(0, 0, W, yHor);
+  }
+  g.fillStyle = P.sol; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+}
+
+// ---------------------------------------------------------------- 3. nuvens: pinceladas longas e finas
+function nuvens(){
+  g.save(); g.globalCompositeOperation = 'screen';
+  for (let i = 0; i < 26; i++) {
+    const y = entre(0.08, 0.60) * yHor, x = entre(-0.1, 1.0) * W, comp = entre(180, 620) * U, esp = entre(5, 20) * U;
+    const perto = 1 - Math.min(1, Math.hypot(x + comp / 2 - W * CFG.solX, (y - H * CFG.solY) * 2) / (W * 0.7));
+    const cor = mistura(hex(P.ceu[2]), hex(P.brilho), 0.3 + 0.7 * perto);
+    for (let k = 0; k < 7; k++) {                     // cada nuvem é um feixe de elipses achatadas
+      const dx = entre(-0.25, 0.25) * comp, dy = entre(-1, 1) * esp;
+      const gr = g.createRadialGradient(0, 0, 0, 0, 0, 1);
+      gr.addColorStop(0, rgba(cor, 0.16)); gr.addColorStop(1, rgba(cor, 0));
+      g.save(); g.translate(x + comp / 2 + dx, y + dy); g.scale(comp * entre(0.3, 0.55), esp * entre(0.6, 1.3));
+      g.fillStyle = gr; g.beginPath(); g.arc(0, 0, 1, 0, 7); g.fill(); g.restore();
+    }
+  }
+  g.restore();
+}
+
+// ---------------------------------------------------------------- 4. serras, do fundo para a frente
+function perfilSerra(i, n){
+  const t = i / (n - 1);                              // 0 longe, 1 perto
+  const base = yHor - (1 - t) * 0.10 * H, amp = (0.20 - 0.07 * t) * H, freq = 1.3 + t * 1.6, desloc = i * 37.7;
+  return (x) => {
+    const u = x / W;
+    const serra = fbm(u * freq + desloc, i * 9.1, 5);
+    const pico = Math.pow(Math.abs(Math.sin((u * (1.1 + 0.5 * i) + desloc) * Math.PI)), 1.5);  // dá cumes definidos
+    return base - amp * (0.20 + 0.75 * serra * (0.55 + 0.45 * pico)) - 0.02 * H * ruido2(u * 60 + desloc, i);
+  };
+}
+function serras(){
+  const n = CFG.serras;
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1), f = perfilSerra(i, n), cor = hex(P.serras[Math.min(i, P.serras.length - 1)]);
+    g.beginPath(); g.moveTo(0, yHor + 2);
+    let topo = H;
+    for (let x = 0; x <= W; x += 2) { const y = f(x); topo = Math.min(topo, y); g.lineTo(x, y); }
+    g.lineTo(W, yHor + 2); g.closePath();
+    const gr = g.createLinearGradient(0, topo, 0, yHor);      // corpo: escurece um pouco no alto, some na névoa embaixo
+    gr.addColorStop(0, rgba(mistura(cor, [0, 0, 0], 0.10))); gr.addColorStop(0.55, rgba(cor));
+    gr.addColorStop(1, rgba(mistura(cor, hex(P.nevoa), 0.55 * (1 - t) + 0.12)));
+    g.fillStyle = gr; g.fill();
+    // luz de contorno do lado do sol: só nos planos distantes, senão vira contorno de desenho animado
+    if (t < 0.7) {
+      g.save(); g.clip(); g.globalCompositeOperation = 'screen';
+      const gl = g.createRadialGradient(W * CFG.solX, H * CFG.solY, 0, W * CFG.solX, H * CFG.solY, W * 0.45);
+      gl.addColorStop(0, rgba(hex(P.brilho), 0.42 * (1 - t))); gl.addColorStop(1, rgba(hex(P.brilho), 0));
+      g.fillStyle = gl; g.fillRect(0, 0, W, yHor); g.restore();
+    }
+    if (CFG.pinheiros && t >= 0.5) pinheirosNaCrista(f, mistura(cor, [0, 0, 0], 0.18), (10 + 26 * (t - 0.5) * 2) * U, i);
+  }
+}
+function pinheiro(x, y, alt, cor){
+  const larg = alt * entre(0.26, 0.36), andares = 5;
+  g.fillStyle = cor; g.beginPath();
+  g.moveTo(x, y - alt);
+  for (let k = 1; k <= andares; k++) { const yy = y - alt + (alt * 0.975) * k / andares, l = larg * (k / andares) * entre(0.85, 1.1); g.lineTo(x + l, yy); g.lineTo(x + l * 0.45, yy - alt * 0.03); }
+  g.lineTo(x + larg * 0.08, y - alt * 0.025); g.lineTo(x + larg * 0.08, y + 2); g.lineTo(x - larg * 0.08, y + 2); g.lineTo(x - larg * 0.08, y - alt * 0.025);
+  for (let k = andares; k >= 1; k--) { const yy = y - alt + (alt * 0.975) * k / andares, l = larg * (k / andares) * entre(0.85, 1.1); g.lineTo(x - l * 0.45, yy - alt * 0.03); g.lineTo(x - l, yy); }
+  g.closePath(); g.fill();
+}
+function pinheirosNaCrista(f, cor, alt, i){
+  // Grupos com vazios entre eles: árvore a intervalo regular parece cerca.
+  let x = entre(-20, 40) * U;
+  while (x < W) {
+    const denso = ruido2(x / (160 * U), i * 3.3) > 0.42;
+    if (denso) pinheiro(x, f(x) + 3 * U, alt * entre(0.55, 1.25), rgba(cor));
+    x += (denso ? entre(7, 22) : entre(30, 80)) * U * (alt / (24 * U));
+  }
+}
+
+// ---------------------------------------------------------------- 5. água: reflexo espelhado, borrado e riscado
+function agua(){
+  const hA = H - yHor;
+  g.save();
+  g.translate(0, yHor * 2); g.scale(1, -1);
+  g.filter = `blur(${2.2 * U}px)`;
+  g.drawImage(tela, 0, yHor - hA, W, hA, 0, yHor - hA, W, hA);
+  g.restore(); g.filter = 'none';
+  const gr = g.createLinearGradient(0, yHor, 0, H);             // escurece para baixo: a água perto do observador reflete o alto do céu
+  gr.addColorStop(0, rgba(hex(P.frente), 0.18)); gr.addColorStop(1, rgba(hex(P.frente), 0.62));
+  g.fillStyle = gr; g.fillRect(0, yHor, W, hA);
+  for (let i = 0; i < 260; i++) {                               // ondulações: riscos horizontais, mais longos e raros perto
+    const t = Math.pow(R(), 1.6), y = yHor + 3 * U + t * hA, comp = (14 + 150 * t) * entre(0.4, 1) * U, x = R() * W;
+    const noBrilho = Math.max(0, 1 - Math.abs(x - W * CFG.solX) / (W * (0.07 + 0.10 * t)));
+    g.strokeStyle = noBrilho > 0.05 && R() < 0.8 ? rgba(hex(P.sol), 0.14 + 0.55 * noBrilho) : rgba(R() < 0.5 ? hex(P.frente) : hex(P.nevoa), 0.10);
+    g.lineWidth = (0.8 + 2.2 * t) * U; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(x - comp / 2, y); g.lineTo(x + comp / 2, y); g.stroke();
+  }
+  // Caminho de luz do astro na água: riscos curtos empilhados, alargando para perto.
+  for (let i = 0; i < 90; i++) {
+    const t = Math.pow(R(), 1.3), y = yHor + 6 * U + t * hA * 0.92, larg = (26 + 120 * t) * U;
+    const x = W * CFG.solX + entre(-1, 1) * larg * 0.5, comp = entre(10, 46) * U * (0.5 + t);
+    g.strokeStyle = rgba(hex(P.sol), entre(0.25, 0.75) * (1 - 0.5 * t)); g.lineWidth = (1 + 2 * t) * U;
+    g.beginPath(); g.moveTo(x - comp / 2, y); g.lineTo(x + comp / 2, y); g.stroke();
+  }
+  // Névoa na linha d'água esconde a emenda. Em bolhas de tamanhos variados: uma faixa lisa vira uma barra.
+  // Em três ou quatro bancos separados, com falhas entre eles: espalhada por igual, volta a ser uma barra.
+  const bancos = [[0.34, 0.16], [0.62, 0.22], [0.90, 0.12]];
+  for (let i = 0; i < 40; i++) {
+    const [bc, bl] = bancos[i % bancos.length];
+    const x = (bc + entre(-1, 1) * bl * Math.sqrt(R())) * W, l = entre(60, 210) * U, a = entre(5, 15) * U, y = yHor + entre(-12, 6) * U;
+    const nv = g.createRadialGradient(0, 0, 0, 0, 0, 1);
+    nv.addColorStop(0, rgba(hex(P.nevoa), entre(0.05, 0.17))); nv.addColorStop(1, rgba(hex(P.nevoa), 0));
+    g.save(); g.translate(x, y); g.scale(l, a); g.fillStyle = nv; g.beginPath(); g.arc(0, 0, 1, 0, 7); g.fill(); g.restore();
+  }
+}
+
+// ---------------------------------------------------------------- 6. primeiro plano: margem escura, pinheiros grandes, cabana
+function primeiroPlano(){
+  const cor = hex(P.frente);
+  const f = (x) => H * 0.915 - 0.11 * H * Math.pow(Math.max(0, 1 - x / (W * 0.46)), 1.4) - 0.02 * H * fbm(x / (300 * U), 5.5, 3);
+  g.fillStyle = rgba(cor); g.beginPath(); g.moveTo(0, H);
+  for (let x = 0; x <= W; x += 3) g.lineTo(x, f(x));
+  g.lineTo(W, H); g.closePath(); g.fill();
+  // Moldura natural: árvores altas só à esquerda, do lado oposto ao sol, para equilibrar o peso.
+  for (const [u, a] of [[0.035, 420], [0.10, 560], [0.165, 370], [0.225, 250], [0.30, 150], [0.345, 110]]) pinheiro(W * u, f(W * u) + 6 * U, a * U * entre(0.94, 1.06), rgba(cor));
+  // Cabana pequena: o ponto de interesse humano. Janela acesa é o segundo ponto mais claro da imagem.
+  const cx = W * 0.445, cy = f(cx) + 2 * U, l = 92 * U, a = 54 * U;
+  g.fillStyle = rgba(cor);
+  g.fillRect(cx - l / 2, cy - a, l, a + 4 * U);
+  g.beginPath(); g.moveTo(cx - l * 0.62, cy - a); g.lineTo(cx, cy - a - 46 * U); g.lineTo(cx + l * 0.62, cy - a); g.closePath(); g.fill();
+  g.fillRect(cx + l * 0.22, cy - a - 52 * U, 13 * U, 34 * U);
+  const jx = cx - 11 * U, jy = cy - a * 0.70, jl = 24 * U, ja = 22 * U;
+  const br = g.createRadialGradient(jx + jl / 2, jy + ja / 2, 0, jx + jl / 2, jy + ja / 2, 105 * U);
+  br.addColorStop(0, rgba(hex(P.luzJanela), 0.50)); br.addColorStop(1, rgba(hex(P.luzJanela), 0));
+  g.fillStyle = br; g.fillRect(jx - 110 * U, jy - 110 * U, 250 * U, 250 * U);
+  g.fillStyle = P.luzJanela; g.fillRect(jx, jy, jl, ja);
+  g.fillStyle = rgba(cor); g.fillRect(jx + jl / 2 - 1 * U, jy, 2 * U, ja); g.fillRect(jx, jy + ja / 2 - 1 * U, jl, 2 * U);
+  // Juncos à direita: equilibram o peso das árvores sem competir com elas.
+  g.strokeStyle = rgba(cor); g.lineCap = 'round';
+  for (let k = 0; k < 70; k++) {
+    const x = W * entre(0.74, 1.0), y0 = f(x) + 4 * U, alt = entre(18, 78) * U * (0.5 + (x / W - 0.74) * 2.4), inc = entre(-0.25, 0.35);
+    g.lineWidth = entre(1.2, 2.4) * U; g.beginPath(); g.moveTo(x, y0); g.quadraticCurveTo(x + inc * alt * 0.3, y0 - alt * 0.6, x + inc * alt, y0 - alt); g.stroke();
+  }
+  // fumaça da chaminé: poucas bolhas claras subindo e abrindo
+  for (let k = 0; k < 14; k++) { const t = k / 13; g.fillStyle = rgba(hex(P.nevoa), 0.10 * (1 - t));
+    g.beginPath(); g.arc(cx + l * 0.22 + 4 * U + (22 * t * t + 6 * Math.sin(t * 5)) * U, cy - a - 54 * U - 120 * t * U, (4 + 15 * t) * U, 0, 7); g.fill(); }
+}
+
+// ---------------------------------------------------------------- 7. aves: grupo pequeno em V aberto, perto de um terço
+function aves(){
+  g.strokeStyle = rgba(hex(P.frente), 0.85); g.lineCap = 'round';
+  const bx = W * 0.40, by = H * 0.30;
+  for (let i = 0; i < 7; i++) {
+    const x = bx + (i - 3) * 30 * U + entre(-6, 6) * U, y = by + Math.abs(i - 3) * 13 * U + entre(-5, 5) * U, s = entre(7, 11) * U;
+    g.lineWidth = 1.7 * U; g.beginPath(); g.moveTo(x - s, y - s * 0.25); g.quadraticCurveTo(x - s * 0.4, y - s * 0.7, x, y); g.quadraticCurveTo(x + s * 0.4, y - s * 0.7, x + s, y - s * 0.25); g.stroke();
+  }
+}
+
+// ---------------------------------------------------------------- 8. acabamento em pixels: papel, grão e vinheta
+function acabamento(){
+  const img = g.getImageData(0, 0, W, H), d = img.data, G = CFG.graoPapel * 255;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 4;
+    const fibra = fbm(x / (3.2 * U), y / (4.2 * U), 3) - 0.47;          // trama do papel, quase sem direção
+    const grao = h2(x, y) - 0.5;
+    const vx = x / W - 0.5, vy = y / H - 0.5, vin = 1 - 0.34 * Math.pow(Math.min(1, (vx * vx + vy * vy) * 2.2), 1.5);
+    const k = (fibra * 0.9 + grao * 0.8) * G;
+    d[i] = Math.max(0, Math.min(255, d[i] * vin + k)); d[i + 1] = Math.max(0, Math.min(255, d[i + 1] * vin + k)); d[i + 2] = Math.max(0, Math.min(255, d[i + 2] * vin + k * 0.9));
+  }
+  g.putImageData(img, 0, 0);
+}
+
+ceu(); astro(); nuvens(); serras(); agua(); primeiroPlano(); aves(); acabamento();
+window.IMAGEM_PRONTA = true;
+</script>
+</body>
+</html>

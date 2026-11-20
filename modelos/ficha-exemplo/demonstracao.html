@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Ficha pingo: o mesmo personagem em várias poses</title>
+<style>html, body { margin: 0; background: #F6F3EC; } canvas { display: block; }</style>
+</head>
+<body>
+<canvas id="tela" width="1600" height="900"></canvas>
+<script src="pingo.js"></script>
+<script>
+// node scripts/renderizar.mjs demonstracao.html pingo-poses.png --largura 1600 --altura 900
+const g = document.getElementById('tela').getContext('2d');
+g.fillStyle = '#F6F3EC'; g.fillRect(0, 0, 1600, 900);
+g.fillStyle = '#E7E1D3'; g.fillRect(0, 610, 1600, 290);
+const cenas = [
+  { x: 230, tamanho: 250, pose: 'parado', expressao: 'feliz' },
+  { x: 560, tamanho: 250, pose: 'acenando', expressao: 'piscando' },
+  { x: 890, tamanho: 250, pose: 'comemorando', expressao: 'surpreso' },
+  { x: 1200, tamanho: 250, pose: 'parado', expressao: 'triste', viradoPara: 'esquerda' },
+  { x: 1420, tamanho: 110, pose: 'acenando', expressao: 'feliz', viradoPara: 'esquerda' },
+  { x: 1525, tamanho: 60, pose: 'parado', expressao: 'feliz' },
+];
+g.font = '600 20px "Segoe UI", system-ui, sans-serif'; g.textAlign = 'center';
+for (const c of cenas) {
+  desenharPingo(g, { ...c, y: 660 });
+  g.fillStyle = '#5E6470';
+  if (c.tamanho > 100) g.fillText(c.pose + ', ' + c.expressao, c.x, 740);
+}
+g.textAlign = 'left'; g.fillStyle = '#12343C'; g.font = '700 34px "Segoe UI", system-ui, sans-serif';
+g.fillText('Ficha "pingo": uma função, o mesmo personagem', 70, 96);
+</script>
+</body>
+</html>

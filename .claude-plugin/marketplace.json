@@ -1,0 +1,11 @@
+{
+  "name": "plugin-imagens-claude-code",
+  "owner": { "name": "marco3079" },
+  "plugins": [
+    {
+      "name": "imagens",
+      "source": "./",
+      "description": "O Claude gera imagens escrevendo código que desenha, olhando o resultado e refazendo. Sem gerador externo."
+    }
+  ]
+}

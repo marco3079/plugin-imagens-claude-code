@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Modelo: edição e restauração de imagem por código</title>
+<style>html, body { margin: 0; background: #222; } canvas { display: block; }</style>
+</head>
+<body>
+<canvas id="tela"></canvas>
+<script>
+// =====================================================================================
+// MODELO edicao: carrega uma imagem local, aplica uma lista de operações em pixels e deixa o
+// resultado no canvas #tela. O arquivo original nunca é alterado.
+//
+// Renderize com (o tamanho da página não importa, o canvas fica do tamanho da imagem):
+//   node scripts/renderizar.mjs edicao.html restaurada.png --canvas "#tela"
+//   node scripts/antes-depois.mjs original.png restaurada.png antes-depois.png
+//
+// Ler pixels de imagem local numa página file:// só funciona porque o renderizador abre o
+// navegador com --allow-file-access-from-files. Sem essa opção o canvas fica "tainted" e
+// getImageData lança SecurityError.
+// =====================================================================================
+window.IMAGEM_PRONTA = false;
+
+const ENTRADA = 'danificada.png';            // caminho relativo a este arquivo
+const MASCARA = null;                  // opcional: PNG do mesmo tamanho, branco onde há defeito a reconstruir
+const REFERENCIA = 'original.png';               // opcional: imagem sem defeito, só para medir (PSNR no console)
+
+// A ordem importa. Regra: primeiro remover defeitos, depois ruído, depois tom e cor, nitidez por último.
+// Nitidez antes do ruído amplifica o ruído; níveis antes dos riscos estouram os riscos.
+const OPERACOES = [
+  { op: 'defeitos', limiar: 0.14, raio: 5, engordar: 1 },   // acha riscos e pontos (mais claros ou escuros que a vizinhança) e reconstrói
+  { op: 'ruido', raio: 6, luma: 0.07, croma: 0.14, cromaPre: 2.0 },  // bilateral: forte na cor, leve no brilho
+  { op: 'niveis', corte: 0.001, porCanal: true },            // leva o mais escuro a preto neutro e o mais claro a branco neutro
+  { op: 'saturacao', valor: 1.9 },                           // o quanto desbotou não se mede: ajuste olhando
+  { op: 'curva', contraste: 0.10, gama: 0.92 },              // S suave
+  { op: 'nitidez', raio: 1.4, quanto: 0.6, limiar: 0.02 },   // máscara de desfoque
+];
+
+// ---------------------------------------------------------------- utilidades
+// A imagem de trabalho é { w, h, r, g, b } com Float32Array de 0 a 1.
+const lum = (im, i) => 0.299 * im.r[i] + 0.587 * im.g[i] + 0.114 * im.b[i];
+const copia = (im) => ({ w: im.w, h: im.h, r: im.r.slice(), g: im.g.slice(), b: im.b.slice() });
+function carregar(caminho){ return new Promise((ok, erro) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => erro(new Error('Não abriu a imagem: ' + caminho)); i.src = caminho; }); }
+function paraFloat(img){
+  const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+  const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0);
+  const d = x.getImageData(0, 0, c.width, c.height).data, n = c.width * c.height;
+  const im = { w: c.width, h: c.height, r: new Float32Array(n), g: new Float32Array(n), b: new Float32Array(n) };
+  for (let i = 0; i < n; i++) { im.r[i] = d[i * 4] / 255; im.g[i] = d[i * 4 + 1] / 255; im.b[i] = d[i * 4 + 2] / 255; }
+  return im;
+}
+function desfoque(canal, w, h, sigma){                 // gaussiano separável
+  const raio = Math.max(1, Math.ceil(sigma * 2.5)), k = []; let s = 0;
+  for (let i = -raio; i <= raio; i++) { const v = Math.exp(-i * i / (2 * sigma * sigma)); k.push(v); s += v; }
+  const tmp = new Float32Array(canal.length), out = new Float32Array(canal.length);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let a = 0; for (let i = -raio; i <= raio; i++) a += canal[y * w + Math.min(w - 1, Math.max(0, x + i))] * k[i + raio]; tmp[y * w + x] = a / s; }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let a = 0; for (let i = -raio; i <= raio; i++) a += tmp[Math.min(h - 1, Math.max(0, y + i)) * w + x] * k[i + raio]; out[y * w + x] = a / s; }
+  return out;
+}
+
+// ---------------------------------------------------------------- operações
+const OPS = {
+  // Riscos e poeira: pixel cujo brilho foge da mediana da vizinhança. Reconstrução de fora para dentro.
+  defeitos(im, { limiar = 0.16, raio = 3, engordar = 1, mascara = null }){
+    const { w, h } = im, n = w * h, L = new Float32Array(n);
+    for (let i = 0; i < n; i++) L[i] = lum(im, i);
+    let m = new Uint8Array(n);
+    if (mascara) for (let i = 0; i < n; i++) m[i] = mascara[i] > 0.5 ? 1 : 0;
+    else {
+      const viz = new Float32Array((2 * raio + 1) ** 2);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        let k = 0;
+        for (let dy = -raio; dy <= raio; dy++) for (let dx = -raio; dx <= raio; dx++) viz[k++] = L[Math.min(h - 1, Math.max(0, y + dy)) * w + Math.min(w - 1, Math.max(0, x + dx))];
+        viz.sort();
+        if (Math.abs(L[y * w + x] - viz[k >> 1]) > limiar) m[y * w + x] = 1;
+      }
+    }
+    for (let e = 0; e < engordar; e++) {                 // engorda a máscara: a borda do risco também está suja
+      const m2 = m.slice();
+      for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const i = y * w + x; if (m[i - 1] | m[i + 1] | m[i - w] | m[i + w]) m2[i] = 1; }
+      m = m2;
+    }
+    let marcados = 0; for (let i = 0; i < n; i++) marcados += m[i];
+    // Reconstrução em casca de cebola: cada volta preenche os pixels que têm vizinho bom, com a média deles.
+    let falta = marcados;
+    for (let volta = 0; volta < 40 && falta > 0; volta++) {
+      const feitos = [];
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const i = y * w + x; if (!m[i]) continue;
+        let sr = 0, sg = 0, sb = 0, c = 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+          const j = yy * w + xx; if (m[j]) continue;
+          const p = dx && dy ? 0.7 : 1; sr += im.r[j] * p; sg += im.g[j] * p; sb += im.b[j] * p; c += p;
+        }
+        if (c >= 1.7) { im.r[i] = sr / c; im.g[i] = sg / c; im.b[i] = sb / c; feitos.push(i); }
+      }
+      for (const i of feitos) m[i] = 0;
+      falta -= feitos.length; if (!feitos.length) break;
+    }
+    console.log(`defeitos: ${marcados} pixels reconstruídos (${(100 * marcados / n).toFixed(2)}%)`);
+  },
+
+  // Bilateral em luma e croma separados. O olho tolera pouco ruído de cor e muito desfoque de cor.
+  ruido(im, { raio = 3, luma = 0.07, croma = 0.2, cromaPre = 0 }){
+    const { w, h } = im, n = w * h, Y = new Float32Array(n);
+    let Cb0 = new Float32Array(n), Cr0 = new Float32Array(n);
+    for (let i = 0; i < n; i++) { Y[i] = lum(im, i); Cb0[i] = im.b[i] - Y[i]; Cr0[i] = im.r[i] - Y[i]; }
+    // Ruído de cor em manchas largas não sai só com o bilateral: um desfoque curto antes resolve.
+    const Cb = cromaPre > 0 ? desfoque(Cb0, w, h, cromaPre) : Cb0, Cr = cromaPre > 0 ? desfoque(Cr0, w, h, cromaPre) : Cr0;
+    const Yg = desfoque(Y, w, h, 1.0);                  // guia já alisado: a decisão de borda não segue o ruído
+    const Y2 = new Float32Array(n), Cb2 = new Float32Array(n), Cr2 = new Float32Array(n);
+    const esp = []; for (let dy = -raio; dy <= raio; dy++) for (let dx = -raio; dx <= raio; dx++) esp.push([dx, dy, Math.exp(-(dx * dx + dy * dy) / (2 * (raio * 0.6) ** 2))]);
+    const il = 1 / (2 * luma * luma), ic = 1 / (2 * croma * croma);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x, y0 = Yg[i]; let sy = 0, wy = 0, sb = 0, sr = 0, wc = 0;
+      for (const [dx, dy, pe] of esp) {
+        const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+        const j = yy * w + xx, d = Yg[j] - y0, d2 = d * d;
+        const a = pe * Math.exp(-d2 * il), c = pe * Math.exp(-d2 * ic);
+        sy += Y[j] * a; wy += a; sb += Cb[j] * c; sr += Cr[j] * c; wc += c;
+      }
+      Y2[i] = sy / wy; Cb2[i] = sb / wc; Cr2[i] = sr / wc;
+    }
+    for (let i = 0; i < n; i++) { im.r[i] = Y2[i] + Cr2[i]; im.b[i] = Y2[i] + Cb2[i]; im.g[i] = (Y2[i] - 0.299 * im.r[i] - 0.114 * im.b[i]) / 0.587; }
+  },
+
+  // Níveis automáticos. porCanal: acha os pixels mais escuros e mais claros PELO BRILHO e leva a cor média
+  // deles a preto e a branco neutros. Esticar cada canal pelo próprio histograma troca o véu por outra dominante.
+  // corte pequeno (0.001): se entrar coisa colorida no grupo dos "mais claros" (uma laranja iluminada), ela vira o
+  // branco e a foto inteira ganha a cor oposta. Se o ponto mais claro da foto for colorido, passe pontoBranco: [x, y]
+  // de algo que deveria ser branco ou cinza claro.
+  niveis(im, { corte = 0.004, porCanal = true, preto = null, branco = null, pontoBranco = null, pontoPreto = null }){
+    const n = im.w * im.h;
+    if (porCanal) {
+      const s = { r: desfoque(im.r, im.w, im.h, 3), g: desfoque(im.g, im.w, im.h, 3), b: desfoque(im.b, im.w, im.h, 3) };   // estatística sem ruído
+      const idx = []; for (let i = 0; i < n; i += 7) idx.push(i);
+      idx.sort((a, b) => (0.299 * s.r[a] + 0.587 * s.g[a] + 0.114 * s.b[a]) - (0.299 * s.r[b] + 0.587 * s.g[b] + 0.114 * s.b[b]));
+      const k = Math.max(8, idx.length * corte | 0), media = (lista, c) => lista.reduce((a, i) => a + s[c][i], 0) / lista.length;
+      const perto = (p) => { const l = []; for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) l.push(Math.min(im.h - 1, Math.max(0, p[1] + dy)) * im.w + Math.min(im.w - 1, Math.max(0, p[0] + dx))); return l; };
+      const esc = pontoPreto ? perto(pontoPreto) : idx.slice(0, k), cla = pontoBranco ? perto(pontoBranco) : idx.slice(-k);
+      for (const c of ['r', 'g', 'b']) { const lo = media(esc, c), e = 1 / Math.max(0.02, media(cla, c) - lo); for (let i = 0; i < n; i++) im[c][i] = (im[c][i] - lo) * e; }
+      return;
+    }
+    const limites = (canais) => { const hst = new Uint32Array(1024); let t = 0;
+      for (const c of canais) for (let i = 0; i < n; i += 3) { hst[Math.min(1023, Math.max(0, c[i] * 1023 | 0))]++; t++; }
+      let a = 0, lo = 0, hi = 1023; for (let k = 0; k < 1024; k++) { a += hst[k]; if (a >= t * corte) { lo = k; break; } }
+      a = 0; for (let k = 1023; k >= 0; k--) { a += hst[k]; if (a >= t * corte) { hi = k; break; } }
+      return [preto ?? lo / 1023, branco ?? hi / 1023]; };
+    const grupos = porCanal ? [[im.r], [im.g], [im.b]] : [[im.r, im.g, im.b]];
+    for (const gcan of grupos) { const [lo, hi] = limites(gcan), e = 1 / Math.max(0.02, hi - lo); for (const c of gcan) for (let i = 0; i < n; i++) c[i] = (c[i] - lo) * e; }
+  },
+
+  // Balanço de branco: "cinza" (média neutra) ou um ponto que deveria ser neutro: { ponto: [x, y] }.
+  balanco(im, { ponto = null, forca = 1 }){
+    const n = im.w * im.h; let mr = 0, mg = 0, mb = 0, c = 0;
+    if (ponto) { for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) { const i = Math.min(im.h - 1, Math.max(0, ponto[1] + dy)) * im.w + Math.min(im.w - 1, Math.max(0, ponto[0] + dx)); mr += im.r[i]; mg += im.g[i]; mb += im.b[i]; c++; } }
+    else for (let i = 0; i < n; i += 5) { mr += im.r[i]; mg += im.g[i]; mb += im.b[i]; c++; }
+    const m = (mr + mg + mb) / 3, kr = 1 + (m / mr - 1) * forca, kg = 1 + (m / mg - 1) * forca, kb = 1 + (m / mb - 1) * forca;
+    for (let i = 0; i < n; i++) { im.r[i] *= kr; im.g[i] *= kg; im.b[i] *= kb; }
+  },
+
+  saturacao(im, { valor = 1.2 }){
+    const n = im.w * im.h;
+    for (let i = 0; i < n; i++) { const y = lum(im, i); im.r[i] = y + (im.r[i] - y) * valor; im.g[i] = y + (im.g[i] - y) * valor; im.b[i] = y + (im.b[i] - y) * valor; }
+  },
+
+  // Curva: contraste em S (positivo aumenta), gama (menor que 1 clareia os meios-tons).
+  curva(im, { contraste = 0, gama = 1 }){
+    const f = (v) => { v = Math.min(1, Math.max(0, v)); if (gama !== 1) v = Math.pow(v, gama); const s = v * v * (3 - 2 * v); return v + (s - v) * contraste * 2; };
+    const n = im.w * im.h; for (let i = 0; i < n; i++) { im.r[i] = f(im.r[i]); im.g[i] = f(im.g[i]); im.b[i] = f(im.b[i]); }
+  },
+
+  // Nitidez por máscara de desfoque, só no brilho. limiar evita afiar ruído em área lisa.
+  nitidez(im, { raio = 1.4, quanto = 0.6, limiar = 0.02 }){
+    const { w, h } = im, n = w * h, Y = new Float32Array(n);
+    for (let i = 0; i < n; i++) Y[i] = lum(im, i);
+    const B = desfoque(Y, w, h, raio);
+    for (let i = 0; i < n; i++) { let d = Y[i] - B[i]; const a = Math.abs(d); d = a < limiar ? d * (a / limiar) : d; d *= quanto; im.r[i] += d; im.g[i] += d; im.b[i] += d; }
+  },
+
+  recortar(im, { x, y, largura, altura }){
+    const o = copia(im), n = largura * altura; im.w = largura; im.h = altura;
+    for (const c of ['r', 'g', 'b']) { im[c] = new Float32Array(n); for (let yy = 0; yy < altura; yy++) for (let xx = 0; xx < largura; xx++) im[c][yy * largura + xx] = o[c][(yy + y) * o.w + xx + x]; }
+  },
+};
+
+// ---------------------------------------------------------------- execução
+function psnr(a, b){ let s = 0; const n = a.w * a.h; for (const c of ['r', 'g', 'b']) for (let i = 0; i < n; i++) { const d = Math.min(1, Math.max(0, a[c][i])) - b[c][i]; s += d * d; } return 10 * Math.log10(1 / (s / (3 * n))); }
+
+(async () => {
+  const im = paraFloat(await carregar(ENTRADA));
+  const ref = REFERENCIA ? paraFloat(await carregar(REFERENCIA)) : null;
+  if (ref) console.log('PSNR antes: ' + psnr(im, ref).toFixed(2) + ' dB');
+  let mascara = null;
+  if (MASCARA) { const mi = paraFloat(await carregar(MASCARA)); if (mi.w !== im.w || mi.h !== im.h) throw new Error('A máscara precisa ter o tamanho da imagem'); mascara = mi.r; }
+  for (const o of OPERACOES) {
+    if (!OPS[o.op]) throw new Error('Operação desconhecida: ' + o.op);
+    OPS[o.op](im, o.op === 'defeitos' ? { ...o, mascara: o.mascara === false ? null : mascara } : o);
+  }
+  if (ref && ref.w === im.w && ref.h === im.h) console.log('PSNR depois: ' + psnr(im, ref).toFixed(2) + ' dB');
+  const tela = document.getElementById('tela'); tela.width = im.w; tela.height = im.h;
+  const g = tela.getContext('2d'), saida = g.createImageData(im.w, im.h), d = saida.data;
+  for (let i = 0, n = im.w * im.h; i < n; i++) { d[i * 4] = im.r[i] * 255; d[i * 4 + 1] = im.g[i] * 255; d[i * 4 + 2] = im.b[i] * 255; d[i * 4 + 3] = 255; }
+  g.putImageData(saida, 0, 0);
+  window.IMAGEM_PRONTA = true;
+})().catch((e) => { console.error(e.message); window.IMAGEM_PRONTA = true; });
+</script>
+</body>
+</html>

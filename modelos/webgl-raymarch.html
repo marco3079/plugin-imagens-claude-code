@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Modelo: cena realista por path tracing de SDF</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="tela"></canvas>
+<script>
+// =====================================================================================
+// MODELO webgl-raymarch: "foto" de objetos por path tracing de superfícies SDF.
+//
+// Como usar: edite CENA (câmera, luz, exposição) e o bloco GLSL "CENA" (formas e materiais).
+// Renderize com:  node scripts/renderizar.mjs cena.html cena.png --largura 1280 --altura 960 --limite 600
+// A página acumula CENA.amostras amostras por pixel e só então define IMAGEM_PRONTA = true.
+//
+// O que já vem pronto: câmera com lente fina (profundidade de campo), luz de área retangular
+// com amostragem direta (sombra suave de verdade), iluminação indireta por saltos, verniz com
+// Fresnel, vidro com refração e absorção, ACES, vinheta e grão.
+// =====================================================================================
+window.IMAGEM_PRONTA = false;
+
+const CENA = {
+  amostras: 1100,         // amostras por pixel. 150 para rascunho, 500 a 900 para final
+  saltos: 12,             // saltos máximos do caminho (o vidro pede 8 ou mais)
+  semente: 7,
+  camera: { pos: [0.55, 1.55, 4.6], alvo: [0.02, 0.50, 0.0], fovGraus: 30, abertura: 0.035, focoEm: [0.25, 0.45, 0.4] },
+  // Luz principal: um softbox. "pos" é o centro, aponta para "alvo", meia largura e meia altura.
+  luz: { pos: [-3.8, 2.7, 1.1], alvo: [0.0, 0.3, 0.0], meio: [1.15, 0.9], cor: [1.0, 0.86, 0.70], forca: 26 },
+  ambiente: { cima: [0.060, 0.072, 0.095], baixo: [0.034, 0.030, 0.026] }, // preenchimento frio e fraco
+  recorte: { dir: [0.75, 0.45, -0.5], cor: [0.55, 0.65, 0.9], forca: 2.2 },  // luz de recorte no ambiente (0 desliga)
+  exposicao: 1.0,
+  vinheta: 0.35,
+  grao: 0.018,
+};
+
+const VERT = `#version 300 es
+in vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }`;
+
+const TRACA = `#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D uAnterior;
+uniform vec2 uRes;
+uniform int uQuadro;
+uniform int uSemente;
+uniform vec3 uCamPos, uCamAlvo, uFoco;
+uniform float uFov, uAbertura;
+uniform vec3 uLuzPos, uLuzAlvo, uLuzCor;
+uniform vec2 uLuzMeio;
+uniform vec3 uAmbCima, uAmbBaixo, uRecorteDir, uRecorteCor;
+out vec4 saida;
+
+#define SALTOS __SALTOS__
+#define PI 3.14159265359
+
+// ---------------------------------------------------------------- acaso
+uint est;
+uint pcg(){ est = est * 747796405u + 2891336453u; uint w = ((est >> ((est >> 28u) + 4u)) ^ est) * 277803737u; return (w >> 22u) ^ w; }
+float rnd(){ return float(pcg() >> 8u) * (1.0 / 16777216.0); }
+vec2 rnd2(){ return vec2(rnd(), rnd()); }
+vec3 naEsfera(){ float z = rnd() * 2.0 - 1.0, a = rnd() * 2.0 * PI, r = sqrt(1.0 - z * z); return vec3(r * cos(a), r * sin(a), z); }
+vec2 noDisco(){ float a = rnd() * 2.0 * PI, r = sqrt(rnd()); return r * vec2(cos(a), sin(a)); }
+
+// ---------------------------------------------------------------- ruído
+float h31(vec3 p){ p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
+float ruido(vec3 p){
+  vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(h31(i), h31(i + vec3(1,0,0)), f.x), mix(h31(i + vec3(0,1,0)), h31(i + vec3(1,1,0)), f.x), f.y),
+             mix(mix(h31(i + vec3(0,0,1)), h31(i + vec3(1,0,1)), f.x), mix(h31(i + vec3(0,1,1)), h31(i + vec3(1,1,1)), f.x), f.y), f.z);
+}
+float fbm(vec3 p){ float s = 0.0, a = 0.5; for (int i = 0; i < 4; i++){ s += a * ruido(p); p = p * 2.03 + 17.1; a *= 0.5; } return s; }
+
+// ---------------------------------------------------------------- formas (SDF)
+float sdEsfera(vec3 p, float r){ return length(p) - r; }
+float sdCapsula(vec3 p, vec3 a, vec3 b, float r){ vec3 pa = p - a, ba = b - a; return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0)) - r; }
+float uniaoSuave(float a, float b, float k){ float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0); return mix(b, a, h) - k * h * (1.0 - h); }
+float sdCaixa2(vec2 p, vec2 b){ vec2 d = abs(p) - b; return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0); }
+
+// =============================== CENA: edite daqui até "FIM DA CENA" ===================
+// Unidade: 1.0 é mais ou menos 10 cm. Mesa em y = 0, parede em z = -3.2.
+const vec3 P_LARANJA = vec3(-0.50, 0.394, 0.42);
+const vec3 P_MACA    = vec3( 0.42, 0.316, 0.55);
+const vec3 P_PERA    = vec3( 1.02, 0.00, -0.42);
+const vec3 P_COPO    = vec3(-0.92, 0.00, -0.55);
+
+// Materiais: 1 mesa, 2 parede, 3 laranja, 4 maçã, 5 pera, 6 cabinho, 7 ameixa
+float sdLaranja(vec3 p){
+  vec3 q = p - P_LARANJA; q.y *= 1.06;
+  float d = length(q) - 0.42;
+  if (d < 0.06) {
+    d -= 0.0035 * ruido(q * 55.0) + 0.002 * ruido(q * 110.0);          // poros da casca
+    d += 0.03 * smoothstep(0.10, 0.0, length(q.xz)) * step(0.0, q.y);   // covinha do umbigo
+  }
+  return d * 0.9;
+}
+float sdMaca(vec3 p){
+  vec3 q = p - P_MACA;
+  q.xz *= 1.0 - 0.13 * q.y;                                             // mais larga em cima
+  float lobos = 1.0 + 0.018 * cos(5.0 * atan(q.z, q.x)) * smoothstep(0.1, -0.35, q.y);
+  vec2 t = vec2(length(q.xz) * lobos - 0.15, q.y * 0.88);               // toro fechado: dá as duas covas
+  return (length(t) - 0.28) * 0.8;
+}
+float sdPera(vec3 p){
+  vec3 q = p - P_PERA;
+  q.x += 0.10 * smoothstep(0.3, 1.1, q.y);                              // pescoço levemente torto
+  float d = uniaoSuave(sdEsfera(q - vec3(0, 0.37, 0), 0.37), sdEsfera(q - vec3(0, 0.83, 0), 0.19), 0.30);
+  return d * 0.9;
+}
+float sdCabos(vec3 p){
+  float a = sdCapsula(p - P_MACA, vec3(0, 0.24, 0), vec3(0.05, 0.50, -0.02), 0.013);
+  float b = sdCapsula(p - P_PERA, vec3(-0.10, 0.98, 0), vec3(-0.17, 1.17, 0.03), 0.016);
+  return min(a, b);
+}
+float sdAmeixas(vec3 p){
+  float d = sdEsfera(p - vec3(1.28, 0.135, 0.78), 0.135);
+  d = min(d, sdEsfera(p - vec3(1.00, 0.125, 0.98), 0.125));
+  d = min(d, sdEsfera(p - vec3(1.15, 0.13, 0.50), 0.13));
+  d = min(d, sdEsfera(p - vec3(-1.02, 0.13, 1.05), 0.13));
+  return d;
+}
+// Copo: perfil 2D girado. Parede de 0.035, fundo grosso de 0.11.
+float sdCopo(vec3 p){
+  vec3 q = p - P_COPO;
+  float r = 0.31 + 0.055 * q.y;
+  vec2 c = vec2(length(q.xz), q.y);
+  float fora = sdCaixa2(c - vec2(0.0, 0.61), vec2(r - 0.02, 0.59)) - 0.02;
+  float dentro = max(c.x - (r - 0.035), 0.11 - c.y);
+  return max(fora, -dentro) * 0.85;
+}
+// Água dentro do copo: mesmo raio interno da parede, do fundo até o nível.
+const float NIVEL_AGUA = 0.80;
+float sdAgua(vec3 p){
+  vec3 q = p - P_COPO;
+  float r = 0.31 + 0.055 * q.y;
+  vec2 c = vec2(length(q.xz), q.y);
+  return max(c.x - (r - 0.035), max(0.11 - c.y, c.y - NIVEL_AGUA)) * 0.85;
+}
+vec2 opaco(vec3 p){
+  vec2 r = vec2(p.y, 1.0);
+  float d = p.z + 3.2;          if (d < r.x) r = vec2(d, 2.0);
+  d = sdLaranja(p);             if (d < r.x) r = vec2(d, 3.0);
+  d = sdMaca(p);                if (d < r.x) r = vec2(d, 4.0);
+  d = sdPera(p);                if (d < r.x) r = vec2(d, 5.0);
+  d = sdCabos(p);               if (d < r.x) r = vec2(d, 6.0);
+  d = sdAmeixas(p);              if (d < r.x) r = vec2(d, 7.0);
+  return r;
+}
+
+struct Mat { vec3 cor; float rug; float f0; };
+// Cores em espaço LINEAR (não são os hex da tela). Regra: nada acima de 0.85 nem abaixo de 0.02.
+Mat material(float id, vec3 p){
+  if (id < 1.5) {                                   // mesa: tábuas de nogueira envernizada
+    float larg = 0.95, zi = floor(p.z / larg), zf = fract(p.z / larg);
+    vec3 q = vec3(p.x * 0.55 + zi * 7.31, p.z * 9.0, zi);
+    float veio = fbm(q + 2.5 * fbm(q * 0.6));
+    float aneis = 0.5 + 0.5 * sin(veio * 34.0 + p.z * 30.0);
+    float fio = ruido(vec3(p.x * 1.6 + zi * 3.1, p.z * 90.0, zi)) * ruido(vec3(p.x * 4.0, p.z * 60.0, zi + 5.0));  // fibras finas
+    vec3 cor = mix(vec3(0.075, 0.036, 0.017), vec3(0.235, 0.125, 0.058), smoothstep(0.25, 0.75, veio));
+    cor *= 0.84 + 0.20 * aneis;
+    cor *= 0.84 + 0.42 * fio;
+    cor *= 0.85 + 0.3 * h31(vec3(zi, 3.0, 1.0));                         // cada tábua com um tom
+    float junta = smoothstep(0.016, 0.004, min(zf, 1.0 - zf) * larg);
+    cor *= 1.0 - 0.85 * junta;
+    return Mat(cor, 0.22 + 0.25 * ruido(p * vec3(3.0, 1.0, 14.0)) + 0.4 * junta, 0.045);
+  }
+  if (id < 2.5) {                                   // parede: reboco escuro e quente
+    float m = fbm(p * 2.2) * 0.6 + fbm(p * 9.0) * 0.4;
+    return Mat(vec3(0.115, 0.098, 0.085) * (0.75 + 0.5 * m), 0.9, 0.02);
+  }
+  if (id < 3.5) {                                   // laranja
+    vec3 q = p - P_LARANJA;
+    vec3 cor = mix(vec3(0.82, 0.20, 0.010), vec3(0.90, 0.33, 0.020), fbm(q * 5.0));
+    cor = mix(cor, vec3(0.10, 0.11, 0.03), smoothstep(0.045, 0.012, length(q.xz)) * step(0.0, q.y));  // umbigo
+    return Mat(cor, 0.32 + 0.2 * ruido(q * 60.0), 0.045);
+  }
+  if (id < 4.5) {                                   // maçã: vermelha com fundo amarelo e riscas
+    vec3 q = p - P_MACA;
+    float ang = atan(q.z, q.x), alt = q.y / 0.3;
+    float riscas = fbm(vec3(ang * 7.0, alt * 0.9, 3.0));
+    float mancha = fbm(q * 3.2 + 4.0);
+    float verm = smoothstep(0.28, 0.62, 0.55 * mancha + 0.45 * riscas + 0.20 * alt + 0.12);
+    vec3 cor = mix(vec3(0.58, 0.47, 0.090), mix(vec3(0.36, 0.020, 0.024), vec3(0.20, 0.008, 0.016), fbm(q * 6.0 + 9.0)), verm);
+    cor *= 0.80 + 0.4 * fbm(vec3(ang * 22.0, alt * 1.5, 8.0));           // riscas finas na vertical
+    cor = mix(cor, vec3(0.62, 0.50, 0.26), 0.45 * smoothstep(0.86, 0.92, ruido(q * 95.0)));           // lenticelas
+    cor = mix(cor, vec3(0.20, 0.16, 0.04), smoothstep(0.10, 0.02, length(q.xz)) * step(0.0, q.y));    // cova do cabo
+    return Mat(cor, 0.20 + 0.10 * ruido(q * 30.0), 0.05);
+  }
+  if (id < 5.5) {                                   // pera: verde amarelada, pintas e rubor
+    vec3 q = p - P_PERA;
+    vec3 cor = mix(vec3(0.50, 0.46, 0.070), vec3(0.36, 0.42, 0.055), fbm(q * 3.0));
+    cor = mix(cor, vec3(0.55, 0.16, 0.04), 0.5 * smoothstep(0.1, 0.5, q.x + 0.25 * fbm(q * 2.0)) * smoothstep(1.0, 0.3, q.y));
+    cor = mix(cor, vec3(0.20, 0.13, 0.04), 0.55 * smoothstep(0.84, 0.90, ruido(q * 120.0)));
+    return Mat(cor, 0.38, 0.04);
+  }
+  if (id < 6.5) return Mat(vec3(0.07, 0.04, 0.02), 0.7, 0.03);           // cabinhos
+  float pruina = fbm(p * 14.0);                                           // ameixas com pruína (o pó claro)
+  return Mat(mix(vec3(0.045, 0.012, 0.050), vec3(0.16, 0.14, 0.24), 0.55 * smoothstep(0.35, 0.75, pruina)), 0.30 + 0.3 * pruina, 0.04);
+}
+const vec3 VIDRO_ABSORCAO = vec3(1.1, 0.35, 0.75);  // por unidade de caminho: tinge de verde nas bordas
+const vec3 AGUA_ABSORCAO = vec3(0.10, 0.03, 0.02);
+const float VIDRO_IOR = 1.5, AGUA_IOR = 1.33;
+// =============================== FIM DA CENA ===========================================
+
+vec3 normalOpaco(vec3 p){ vec2 e = vec2(0.0006, 0.0); return normalize(vec3(opaco(p + e.xyy).x - opaco(p - e.xyy).x, opaco(p + e.yxy).x - opaco(p - e.yxy).x, opaco(p + e.yyx).x - opaco(p - e.yyx).x)); }
+vec3 normalAgua(vec3 p){ vec2 e = vec2(0.0006, 0.0); return normalize(vec3(sdAgua(p + e.xyy) - sdAgua(p - e.xyy), sdAgua(p + e.yxy) - sdAgua(p - e.yxy), sdAgua(p + e.yyx) - sdAgua(p - e.yyx))); }
+vec3 normalCopo(vec3 p){ vec2 e = vec2(0.0006, 0.0); return normalize(vec3(sdCopo(p + e.xyy) - sdCopo(p - e.xyy), sdCopo(p + e.yxy) - sdCopo(p - e.yxy), sdCopo(p + e.yyx) - sdCopo(p - e.yyx))); }
+
+// Marcha o raio. meio: 0 ar, 1 vidro, 2 água. Devolve (t, id). id 0 é uma interface transparente, -1 é nada.
+vec2 marchar(vec3 ro, vec3 rd, int meio){
+  float t = 0.0;
+  for (int i = 0; i < 220; i++){
+    vec3 p = ro + rd * t;
+    if (meio != 0) {
+      float d = meio == 1 ? -sdCopo(p) : -sdAgua(p);
+      if (d < 0.0004) return vec2(t, 0.0);
+      t += max(d, 0.0008);
+      if (t > 4.0) break;
+    } else {
+      vec2 o = opaco(p); float g = min(sdCopo(p), sdAgua(p));
+      float d = min(o.x, g);
+      // O vidro usa limiar fixo e pequeno: limiar que cresce com a distância faz o raio parar antes da
+      // superfície, "entrar" ainda do lado de fora e desenhar faixas falsas dentro do copo.
+      if (g < 0.0003) return vec2(t, 0.0);
+      if (o.x < 0.0004 + 0.0002 * t) return vec2(t, o.y);
+      t += d;
+      if (t > 30.0) break;
+    }
+  }
+  return vec2(-1.0, -1.0);
+}
+
+// Sombra para a luz: opacos bloqueiam, o vidro só escurece pelo caminho que a luz faz dentro dele.
+vec3 visibilidade(vec3 ro, vec3 rd, float tmax){
+  float t = 0.004 + 0.008 * rnd(); vec3 v = vec3(1.0);                 // início sorteado: troca faixas por ruído fino
+  for (int i = 0; i < 110; i++){
+    vec3 p = ro + rd * t;
+    float d = opaco(p).x;
+    if (d < 0.0005) return vec3(0.0);
+    float g = sdCopo(p);
+    float passo = min(d, max(abs(g), 0.006));
+    if (g < 0.0) v *= exp(-passo * 9.0 * (vec3(0.6) + VIDRO_ABSORCAO));
+    t += passo;
+    if (t > tmax) break;
+  }
+  return v;
+}
+
+// Luz de área retangular
+vec3 luzN, luzU, luzV;
+void montarLuz(){ luzN = normalize(uLuzAlvo - uLuzPos); luzU = normalize(cross(vec3(0, 1, 0), luzN)); luzV = cross(luzN, luzU); }
+float acertaLuz(vec3 ro, vec3 rd){
+  float den = dot(rd, luzN); if (den > -1e-4) return -1.0;
+  float t = dot(uLuzPos - ro, luzN) / den; if (t < 0.0) return -1.0;
+  vec3 q = ro + rd * t - uLuzPos;
+  return (abs(dot(q, luzU)) < uLuzMeio.x && abs(dot(q, luzV)) < uLuzMeio.y) ? t : -1.0;
+}
+// Ambiente: degradê fraco mais uma luz de recorte larga, atrás e à direita, que solta as bordas do fundo.
+vec3 ambiente(vec3 rd){
+  vec3 c = mix(uAmbBaixo, uAmbCima, smoothstep(-0.3, 0.6, rd.y));
+  return c + uRecorteCor * smoothstep(0.86, 0.97, dot(rd, uRecorteDir));
+}
+
+vec3 cosseno(vec3 n){
+  vec3 t = normalize(cross(abs(n.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0), n)), b = cross(n, t);
+  vec2 d = noDisco();
+  return normalize(t * d.x + b * d.y + n * sqrt(max(0.0, 1.0 - dot(d, d))));
+}
+
+vec3 caminho(vec3 ro, vec3 rd){
+  vec3 L = vec3(0.0), T = vec3(1.0);
+  bool especular = true; int meio = 0;
+  float teto = 14.0;                               // limite de cada contribuição: baixa depois do 1o salto difuso
+  for (int s = 0; s < SALTOS; s++){
+    vec2 h = marchar(ro, rd, meio);
+    float tl = meio != 0 ? -1.0 : acertaLuz(ro, rd);
+    if (tl > 0.0 && (h.x < 0.0 || tl < h.x)) { if (especular) L += min(T * uLuzCor, vec3(teto)); break; }
+    if (h.x < 0.0) { L += min(T * ambiente(rd), vec3(teto)); break; }
+    vec3 p = ro + rd * h.x;
+
+    if (h.y < 0.5) {                                 // ---------- interface transparente (ar, vidro, água)
+      // Descobre o meio do outro lado: quem está a menos de 0.004 da superfície.
+      float gc = sdCopo(p), ga = sdAgua(p);
+      int outro; vec3 n;
+      if (meio == 0) { outro = gc < ga ? 1 : 2; n = outro == 1 ? normalCopo(p) : normalAgua(p); }
+      else if (meio == 1) { T *= exp(-VIDRO_ABSORCAO * h.x); outro = ga < 0.004 ? 2 : 0; n = -normalCopo(p); }
+      else { T *= exp(-AGUA_ABSORCAO * h.x); outro = gc < 0.004 ? 1 : 0; n = -normalAgua(p); }
+      float n1 = meio == 0 ? 1.0 : meio == 1 ? VIDRO_IOR : AGUA_IOR;
+      float n2 = outro == 0 ? 1.0 : outro == 1 ? VIDRO_IOR : AGUA_IOR;
+      float c = min(1.0, -dot(rd, n));
+      vec3 refr = refract(rd, n, n1 / n2);
+      float f0 = pow((n1 - n2) / (n1 + n2), 2.0);
+      float F = refr == vec3(0.0) ? 1.0 : f0 + (1.0 - f0) * pow(1.0 - c, 5.0);
+      if (rnd() < F) { rd = reflect(rd, n); ro = p + n * 0.002; }
+      else { rd = normalize(refr); ro = p - n * 0.002; meio = outro; }
+      especular = true;
+      continue;
+    }
+
+    vec3 n = normalOpaco(p);
+    Mat m = material(h.y, p);
+    float c = max(0.0, -dot(rd, n));
+    float F = m.f0 + (1.0 - m.f0) * pow(1.0 - c, 5.0) * (1.0 - 0.6 * m.rug);
+    ro = p + n * 0.002;
+    if (m.rug < 0.6 && rnd() < F) {                  // ---------- verniz: reflexo com rugosidade
+      rd = normalize(reflect(rd, n) + m.rug * m.rug * 1.6 * naEsfera());
+      if (dot(rd, n) <= 0.0) break;
+      especular = true;
+    } else {                                         // ---------- difuso com luz direta
+      T *= m.cor;
+      vec2 u = rnd2() * 2.0 - 1.0;
+      vec3 pl = uLuzPos + luzU * u.x * uLuzMeio.x + luzV * u.y * uLuzMeio.y;
+      vec3 dl = pl - ro; float dist2 = dot(dl, dl), dist = sqrt(dist2); dl /= dist;
+      float cs = dot(n, dl), cl = -dot(luzN, dl);
+      if (cs > 0.0 && cl > 0.0) {
+        float area = 4.0 * uLuzMeio.x * uLuzMeio.y;
+        L += T * uLuzCor * visibilidade(ro, dl, dist - 0.01) * (cs * cl * area / (PI * dist2));
+      }
+      rd = cosseno(n);
+      especular = false;
+      teto = 0.45;
+    }
+    if (s > 2) { float q = clamp(max(T.r, max(T.g, T.b)), 0.05, 0.95); if (rnd() > q) break; T /= q; }
+  }
+  return L;
+}
+
+void main(){
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  est = uint(px.x) * 1973u + uint(px.y) * 9277u + uint(uQuadro) * 26699u + uint(uSemente) * 7919u + 1u; pcg();
+  montarLuz();
+  vec2 uv = (gl_FragCoord.xy + rnd2() - 0.5 * uRes) / uRes.y;         // já inclui o tremor de antisserrilhado
+  vec3 f = normalize(uCamAlvo - uCamPos), r = normalize(cross(f, vec3(0, 1, 0))), u = cross(r, f);
+  vec3 rd = normalize(f + (uv.x * r + uv.y * u) * 2.0 * tan(0.5 * uFov));
+  float foco = dot(uFoco - uCamPos, f);
+  vec3 alvo = uCamPos + rd * (foco / dot(rd, f));                       // plano de foco
+  vec2 l = noDisco() * uAbertura;
+  vec3 ro = uCamPos + r * l.x + u * l.y;
+  vec3 cor = caminho(ro, normalize(alvo - ro));
+  saida = texelFetch(uAnterior, px, 0) + vec4(cor, 1.0);
+}`;
+
+const MOSTRA = `#version 300 es
+precision highp float;
+uniform sampler2D uSoma; uniform vec2 uRes; uniform float uExposicao, uVinheta, uGrao;
+out vec4 saida;
+vec3 aces(vec3 x){ return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }
+float h(vec2 p){ vec3 q = fract(vec3(p.xyx) * 0.1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
+vec3 le(ivec2 d){ vec4 s = texelFetch(uSoma, ivec2(gl_FragCoord.xy) + d, 0); return s.rgb / max(s.a, 1.0); }
+void main(){
+  vec3 c = le(ivec2(0));
+  // Tira vaga-lumes: pixel isolado muito mais claro que os quatro vizinhos vira a média deles.
+  vec3 a = le(ivec2(1, 0)), b = le(ivec2(-1, 0)), d = le(ivec2(0, 1)), e = le(ivec2(0, -1));
+  float lc = dot(c, vec3(0.3, 0.6, 0.1)), lm = max(max(dot(a, vec3(0.3, 0.6, 0.1)), dot(b, vec3(0.3, 0.6, 0.1))), max(dot(d, vec3(0.3, 0.6, 0.1)), dot(e, vec3(0.3, 0.6, 0.1))));
+  if (lc > 1.6 * lm + 0.02) c = 0.25 * (a + b + d + e);
+  c *= uExposicao;
+  vec2 q = gl_FragCoord.xy / uRes - 0.5;
+  c *= 1.0 - uVinheta * smoothstep(0.25, 0.85, length(q * vec2(1.0, uRes.y / uRes.x) * 1.6));
+  c = aces(c);
+  c = pow(c, vec3(1.0 / 2.2));
+  float g = (h(gl_FragCoord.xy) + h(gl_FragCoord.xy + 17.3) - 1.0) * uGrao;  // grão triangular, mais forte nos meios-tons
+  c += g * (0.6 + 0.8 * (1.0 - abs(2.0 * dot(c, vec3(0.299, 0.587, 0.114)) - 1.0)));
+  saida = vec4(c, 1.0);
+}`;
+
+(function iniciar(){
+  const tela = document.getElementById('tela');
+  const W = tela.width = Math.round(innerWidth * devicePixelRatio);
+  const H = tela.height = Math.round(innerHeight * devicePixelRatio);
+  const gl = tela.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true, alpha: false });
+  if (!gl) throw new Error('WebGL2 indisponível neste navegador');
+  const temFloat = gl.getExtension('EXT_color_buffer_float');
+  if (!temFloat) throw new Error('Falta EXT_color_buffer_float (necessária para acumular amostras)');
+
+  function programa(vs, fs){
+    const p = gl.createProgram();
+    for (const [tipo, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+      const s = gl.createShader(tipo); gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error('Shader não compilou: ' + gl.getShaderInfoLog(s));
+      gl.attachShader(p, s);
+    }
+    gl.bindAttribLocation(p, 0, 'a'); gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('Programa não ligou: ' + gl.getProgramInfoLog(p));
+    return p;
+  }
+  const pTraca = programa(VERT, TRACA.replace('__SALTOS__', String(CENA.saltos)));
+  const pMostra = programa(VERT, MOSTRA);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+  const alvos = [0, 1].map(() => {
+    const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, W, H);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    return { tex, fb };
+  });
+  gl.viewport(0, 0, W, H);
+
+  const U = (p, n) => gl.getUniformLocation(p, n);
+  gl.useProgram(pTraca);
+  gl.uniform2f(U(pTraca, 'uRes'), W, H);
+  gl.uniform1i(U(pTraca, 'uSemente'), CENA.semente);
+  gl.uniform3fv(U(pTraca, 'uCamPos'), CENA.camera.pos); gl.uniform3fv(U(pTraca, 'uCamAlvo'), CENA.camera.alvo);
+  gl.uniform3fv(U(pTraca, 'uFoco'), CENA.camera.focoEm);
+  gl.uniform1f(U(pTraca, 'uFov'), CENA.camera.fovGraus * Math.PI / 180); gl.uniform1f(U(pTraca, 'uAbertura'), CENA.camera.abertura);
+  gl.uniform3fv(U(pTraca, 'uLuzPos'), CENA.luz.pos); gl.uniform3fv(U(pTraca, 'uLuzAlvo'), CENA.luz.alvo);
+  gl.uniform3fv(U(pTraca, 'uLuzCor'), CENA.luz.cor.map(c => c * CENA.luz.forca)); gl.uniform2fv(U(pTraca, 'uLuzMeio'), CENA.luz.meio);
+  gl.uniform3fv(U(pTraca, 'uAmbCima'), CENA.ambiente.cima); gl.uniform3fv(U(pTraca, 'uAmbBaixo'), CENA.ambiente.baixo);
+  const rn = Math.hypot(...CENA.recorte.dir);
+  gl.uniform3fv(U(pTraca, 'uRecorteDir'), CENA.recorte.dir.map(c => c / rn)); gl.uniform3fv(U(pTraca, 'uRecorteCor'), CENA.recorte.cor.map(c => c * CENA.recorte.forca));
+  const uQuadro = U(pTraca, 'uQuadro');
+
+  let quadro = 0;
+  const pixel = new Uint8Array(4);
+  function mostrar(){
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.useProgram(pMostra);
+    gl.bindTexture(gl.TEXTURE_2D, alvos[quadro % 2].tex);
+    gl.uniform2f(U(pMostra, 'uRes'), W, H);
+    gl.uniform1f(U(pMostra, 'uExposicao'), CENA.exposicao); gl.uniform1f(U(pMostra, 'uVinheta'), CENA.vinheta); gl.uniform1f(U(pMostra, 'uGrao'), CENA.grao);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  function passo(){
+    // Uma amostra por desenho. Várias por quadro, enquanto couber em 60 ms, para a placa não travar.
+    const t0 = performance.now();
+    do {
+      gl.useProgram(pTraca);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, alvos[(quadro + 1) % 2].fb);
+      gl.bindTexture(gl.TEXTURE_2D, alvos[quadro % 2].tex);
+      gl.uniform1i(uQuadro, quadro);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, new Float32Array(4));  // força a placa a terminar
+      quadro++;
+    } while (quadro < CENA.amostras && performance.now() - t0 < 60);
+    mostrar();
+    if (quadro < CENA.amostras) requestAnimationFrame(passo);
+    else { gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel); console.log('amostras: ' + quadro); window.IMAGEM_PRONTA = true; }
+  }
+  requestAnimationFrame(passo);
+})();
+</script>
+</body>
+</html>

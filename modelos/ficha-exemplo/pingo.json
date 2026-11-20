@@ -1,0 +1,38 @@
+{
+  "nome": "pingo",
+  "tipo": "personagem",
+  "descricao": "Mascote em forma de gota, simpático e simples. Corpo azul petróleo, barriga clara, olhos grandes e bochechas rosadas.",
+  "modulo": "pingo.js",
+  "funcao": "desenharPingo",
+  "tecnica": "canvas2d",
+  "paleta": {
+    "corpo": "#1F7A8C",
+    "corpoSombra": "#0E4D5C",
+    "barriga": "#BFE3E8",
+    "olho": "#12343C",
+    "brilho": "#FFFFFF",
+    "bochecha": "#F08A7B",
+    "contorno": "#0B2F38"
+  },
+  "proporcoes": {
+    "caixa": "1 de largura por 1,25 de altura, origem no centro da base",
+    "olhos": "um pouco acima do centro do corpo redondo, separados por 0,30 da largura",
+    "contorno": "0,035 da largura, sempre arredondado"
+  },
+  "parametros": {
+    "x": "centro da base, em px",
+    "y": "base (onde o personagem pisa), em px",
+    "tamanho": "largura do corpo em px",
+    "pose": ["parado", "acenando", "comemorando"],
+    "expressao": ["feliz", "surpreso", "piscando", "triste"],
+    "viradoPara": ["direita", "esquerda"]
+  },
+  "regras": [
+    "Nunca mudar as cores da paleta nem a proporção entre olhos e corpo.",
+    "O brilho do olho fica sempre no alto à esquerda, mesmo com o personagem virado.",
+    "Tamanho mínimo de 48 px de largura.",
+    "Sombra no chão sempre presente: elipse escura com 18% de opacidade."
+  ],
+  "naoFazer": ["Contorno preto puro", "Degradê no corpo", "Mais de duas cores de destaque na mesma cena"],
+  "previa": "../../exemplos/ficha/pingo-poses.png"
+}
